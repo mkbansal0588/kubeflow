@@ -1,0 +1,689 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: housing-pricing-preidiction-
+  annotations: {pipelines.kubeflow.org/kfp_sdk_version: 1.1.1, pipelines.kubeflow.org/pipeline_compilation_time: '2020-12-18T15:22:33.429475',
+    pipelines.kubeflow.org/pipeline_spec: '{"description": "The pipeline for training
+      and deploying the house price prediction algorithm", "name": "Housing Pricing
+      preidiction"}'}
+  labels: {pipelines.kubeflow.org/kfp_sdk_version: 1.1.1}
+spec:
+  entrypoint: housing-pricing-preidiction
+  templates:
+  - name: housing-pricing-preidiction
+    dag:
+      tasks:
+      - name: hypertune
+        template: hypertune
+        dependencies: [preprocessingstep]
+        arguments:
+          parameters:
+          - {name: preprocessingstep-Output, value: '{{tasks.preprocessingstep.outputs.parameters.preprocessingstep-Output}}'}
+      - name: model-training
+        template: model-training
+        dependencies: [preprocessingstep]
+        arguments:
+          parameters:
+          - {name: preprocessingstep-Output, value: '{{tasks.preprocessingstep.outputs.parameters.preprocessingstep-Output}}'}
+      - name: model-training-2
+        template: model-training-2
+        dependencies: [hypertune, preprocessingstep]
+        arguments:
+          parameters:
+          - {name: hypertune-Output, value: '{{tasks.hypertune.outputs.parameters.hypertune-Output}}'}
+          - {name: preprocessingstep-Output, value: '{{tasks.preprocessingstep.outputs.parameters.preprocessingstep-Output}}'}
+      - {name: preprocessingstep, template: preprocessingstep}
+      - name: prettyprintmatrix
+        template: prettyprintmatrix
+        dependencies: [model-training, model-training-2]
+        arguments:
+          parameters:
+          - {name: model-training-2-Output, value: '{{tasks.model-training-2.outputs.parameters.model-training-2-Output}}'}
+          - {name: model-training-Output, value: '{{tasks.model-training.outputs.parameters.model-training-Output}}'}
+  - name: hypertune
+    container:
+      args: [--bucket-name, mohittest0432, --processeddatafile, '{{inputs.parameters.preprocessingstep-Output}}',
+        --paramas, '{"colsample_bytree": 1, "eta": 0.3, "max_depth": 6, "min_child_weight":
+          1, "objective": "reg:squarederror", "subsample": 1}', '----output-paths',
+        /tmp/outputs/Output/data]
+      command:
+      - python3
+      - -u
+      - -c
+      - "def hypertune(bucket_name, processeddatafile, paramas) :\n\n    params =\
+        \ paramas\n\n    import pandas as pd\n    import numpy as np\n    import xgboost\
+        \ as xgb\n\n    # Now it is time to download the CSV from gcloud storage\n\
+        \    import os\n    os.chdir(\"/\")\n    os.environ['GOOGLE_APPLICATION_CREDENTIALS']\
+        \ = \"/august-sandbox-298320-580249f0836f.json\"\n\n    print(processeddatafile)\n\
+        \    path = 'gs://' + bucket_name + '/' + processeddatafile\n    print(path)\n\
+        \    df_data = pd.read_csv(path)\n\n    #Creating train and test split -\n\
+        \    df_train = df_data[df_data['SalePrice'].isna() == False]\n    df_test\
+        \ = df_data[df_data['SalePrice'].isna() == True]\n\n    #Creating features\
+        \ and labels\n    label=pd.DataFrame(df_train.pop('SalePrice'))\n    x_train\
+        \ = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()\n    x_validation=df_train.iloc[int(df_train.count()[0]\
+        \ * .9):].to_numpy()\n    y_train = label.iloc[:int(df_train.count()[0] *\
+        \ .9)].to_numpy()\n    y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()\n\
+        \n    dtrain = xgb.DMatrix(x_train, y_train)\n    dvalidate = xgb.DMatrix(x_validation,\
+        \ y_validate)\n\n    params = paramas\n    #Metric to use to evaluate decision\
+        \ trees.\n    params['eval_metric'] = \"mae\"\n    # Number of rounds of boosting\
+        \ or number of trees to build\n    num_boost_round = 999\n\n    #########################\
+        \ First two parameters ##########################\n    gridsearch_params =\
+        \ [\n        (max_depth, min_child_weight)\n        for max_depth in range(5,12)\n\
+        \        for min_child_weight in range(5,8)]\n\n    # Define initial best\
+        \ params and MAE\n    min_mae = float(\"Inf\")\n    best_params = None\n \
+        \   for max_depth, min_child_weight in gridsearch_params:\n        print(\"\
+        CV with max_depth={}, min_child_weight={}\".format(max_depth, min_child_weight))\n\
+        \n        # Update our parameters\n        params['max_depth'] = max_depth\n\
+        \        params['min_child_weight'] = min_child_weight\n\n        # Run CV\n\
+        \        cv_results = xgb.cv(\n            params,\n            dtrain,\n\
+        \            num_boost_round=num_boost_round,\n            seed=42,\n    \
+        \        nfold=5,\n            metrics={'mae'},\n            early_stopping_rounds=10)\n\
+        \n        # Update best MAE\n        mean_mae = cv_results['test-mae-mean'].min()\n\
+        \        boost_rounds = cv_results['test-mae-mean'].argmin()\n        print(\"\
+        \\tMAE {} for {} rounds\".format(mean_mae, boost_rounds))\n        if mean_mae\
+        \ < min_mae:\n            min_mae = mean_mae\n            best_params = (max_depth,min_child_weight)\n\
+        \    print(\"Best params: {}, {}, MAE: {}\".format(best_params[0], best_params[1],\
+        \ min_mae))\n\n    params['max_depth'] = best_params[0]\n    params['min_child_weight']\
+        \ = best_params[1]\n\n    ############################# Next parameter ###############################\n\
+        \n    # This can take some time\u2026\n    min_mae = float(\"Inf\")\n    best_params\
+        \ = None\n    for eta in [.3, .2, .1, .05, .01, .005]:\n        print(\"CV\
+        \ with eta={}\".format(eta))\n        print(params)\n\n        # We update\
+        \ our parameters\n\n        params['eta'] = eta\n\n        # Run and time\
+        \ CV\n\n        cv_results = xgb.cv(params, dtrain, num_boost_round=num_boost_round,\
+        \ seed=42, nfold=5, metrics=['mae'], early_stopping_rounds=10)\n        #\
+        \ Update best score\n        mean_mae = cv_results['test-mae-mean'].min()\n\
+        \        boost_rounds = cv_results['test-mae-mean'].argmin()\n        print(\"\
+        \\tMAE {} for {} rounds\\n\".format(mean_mae, boost_rounds))\n        if mean_mae\
+        \ < min_mae:\n            min_mae = mean_mae\n            best_params = eta\n\
+        \    print(\"Best params: {}, MAE: {}\".format(best_params, min_mae))\n  \
+        \  params['eta'] = best_params\n\n    ############################# Testing\
+        \ next two parameters ############################\n\n    gridsearch_params\
+        \ = [\n        (subsample, colsample)\n        for subsample in [i/10. for\
+        \ i in range(7,11)]\n        for colsample in [i/10. for i in range(7,11)]\n\
+        \    ]\n\n    min_mae = float(\"Inf\")\n    best_params = None\n    # We start\
+        \ by the largest values and go down to the smallest\n    for subsample, colsample\
+        \ in reversed(gridsearch_params):\n        print(\"CV with subsample={}, colsample={}\"\
+        .format(subsample, colsample))\n\n        # We update our parameters\n   \
+        \     params['subsample'] = subsample\n        params['colsample_bytree']\
+        \ = colsample\n        # Run CV\n        cv_results = xgb.cv(\n          \
+        \  params,\n            dtrain,\n            num_boost_round=num_boost_round,\n\
+        \            seed=42,\n            nfold=5,\n            metrics={'mae'},\n\
+        \            early_stopping_rounds=10\n        )\n        # Update best score\n\
+        \        mean_mae = cv_results['test-mae-mean'].min()\n        boost_rounds\
+        \ = cv_results['test-mae-mean'].argmin()\n        print(\"\\tMAE {} for {}\
+        \ rounds\".format(mean_mae, boost_rounds))\n        if mean_mae < min_mae:\n\
+        \            min_mae = mean_mae\n            best_params = (subsample,colsample)\n\
+        \    print(\"Best params: {}, {}, MAE: {}\".format(best_params[0], best_params[1],\
+        \ min_mae))\n\n    params['subsample'] = best_params[0]\n    params['colsample_bytree']\
+        \ = best_params[1]\n\n    return params\n\ndef _serialize_json(obj) -> str:\n\
+        \    if isinstance(obj, str):\n        return obj\n    import json\n    def\
+        \ default_serializer(obj):\n        if hasattr(obj, 'to_struct'):\n      \
+        \      return obj.to_struct()\n        else:\n            raise TypeError(\"\
+        Object of type '%s' is not JSON serializable and does not have .to_struct()\
+        \ method.\" % obj.__class__.__name__)\n    return json.dumps(obj, default=default_serializer,\
+        \ sort_keys=True)\n\nimport json\nimport argparse\n_parser = argparse.ArgumentParser(prog='Hypertune',\
+        \ description='')\n_parser.add_argument(\"--bucket-name\", dest=\"bucket_name\"\
+        , type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"\
+        --processeddatafile\", dest=\"processeddatafile\", type=str, required=True,\
+        \ default=argparse.SUPPRESS)\n_parser.add_argument(\"--paramas\", dest=\"\
+        paramas\", type=json.loads, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"\
+        ----output-paths\", dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args\
+        \ = vars(_parser.parse_args())\n_output_files = _parsed_args.pop(\"_output_paths\"\
+        , [])\n\n_outputs = hypertune(**_parsed_args)\n\n_outputs = [_outputs]\n\n\
+        _output_serializers = [\n    _serialize_json,\n\n]\n\nimport os\nfor idx,\
+        \ output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n\
+        \    except OSError:\n        pass\n    with open(output_file, 'w') as f:\n\
+        \        f.write(_output_serializers[idx](_outputs[idx]))\n"
+      image: docker.io/mkbansal0588/kubeflow
+    inputs:
+      parameters:
+      - {name: preprocessingstep-Output}
+    outputs:
+      parameters:
+      - name: hypertune-Output
+        valueFrom: {path: /tmp/outputs/Output/data}
+      artifacts:
+      - {name: hypertune-Output, path: /tmp/outputs/Output/data}
+    metadata:
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--bucket-name", {"inputValue": "bucket_name"}, "--processeddatafile",
+          {"inputValue": "processeddatafile"}, "--paramas", {"inputValue": "paramas"},
+          "----output-paths", {"outputPath": "Output"}], "command": ["python3", "-u",
+          "-c", "def hypertune(bucket_name, processeddatafile, paramas) :\n\n    params
+          = paramas\n\n    import pandas as pd\n    import numpy as np\n    import
+          xgboost as xgb\n\n    # Now it is time to download the CSV from gcloud storage\n    import
+          os\n    os.chdir(\"/\")\n    os.environ[''GOOGLE_APPLICATION_CREDENTIALS'']
+          = \"/august-sandbox-298320-580249f0836f.json\"\n\n    print(processeddatafile)\n    path
+          = ''gs://'' + bucket_name + ''/'' + processeddatafile\n    print(path)\n    df_data
+          = pd.read_csv(path)\n\n    #Creating train and test split -\n    df_train
+          = df_data[df_data[''SalePrice''].isna() == False]\n    df_test = df_data[df_data[''SalePrice''].isna()
+          == True]\n\n    #Creating features and labels\n    label=pd.DataFrame(df_train.pop(''SalePrice''))\n    x_train
+          = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()\n    x_validation=df_train.iloc[int(df_train.count()[0]
+          * .9):].to_numpy()\n    y_train = label.iloc[:int(df_train.count()[0] *
+          .9)].to_numpy()\n    y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()\n\n    dtrain
+          = xgb.DMatrix(x_train, y_train)\n    dvalidate = xgb.DMatrix(x_validation,
+          y_validate)\n\n    params = paramas\n    #Metric to use to evaluate decision
+          trees.\n    params[''eval_metric''] = \"mae\"\n    # Number of rounds of
+          boosting or number of trees to build\n    num_boost_round = 999\n\n    #########################
+          First two parameters ##########################\n    gridsearch_params =
+          [\n        (max_depth, min_child_weight)\n        for max_depth in range(5,12)\n        for
+          min_child_weight in range(5,8)]\n\n    # Define initial best params and
+          MAE\n    min_mae = float(\"Inf\")\n    best_params = None\n    for max_depth,
+          min_child_weight in gridsearch_params:\n        print(\"CV with max_depth={},
+          min_child_weight={}\".format(max_depth, min_child_weight))\n\n        #
+          Update our parameters\n        params[''max_depth''] = max_depth\n        params[''min_child_weight'']
+          = min_child_weight\n\n        # Run CV\n        cv_results = xgb.cv(\n            params,\n            dtrain,\n            num_boost_round=num_boost_round,\n            seed=42,\n            nfold=5,\n            metrics={''mae''},\n            early_stopping_rounds=10)\n\n        #
+          Update best MAE\n        mean_mae = cv_results[''test-mae-mean''].min()\n        boost_rounds
+          = cv_results[''test-mae-mean''].argmin()\n        print(\"\\tMAE {} for
+          {} rounds\".format(mean_mae, boost_rounds))\n        if mean_mae < min_mae:\n            min_mae
+          = mean_mae\n            best_params = (max_depth,min_child_weight)\n    print(\"Best
+          params: {}, {}, MAE: {}\".format(best_params[0], best_params[1], min_mae))\n\n    params[''max_depth'']
+          = best_params[0]\n    params[''min_child_weight''] = best_params[1]\n\n    #############################
+          Next parameter ###############################\n\n    # This can take some
+          time\u2026\n    min_mae = float(\"Inf\")\n    best_params = None\n    for
+          eta in [.3, .2, .1, .05, .01, .005]:\n        print(\"CV with eta={}\".format(eta))\n        print(params)\n\n        #
+          We update our parameters\n\n        params[''eta''] = eta\n\n        # Run
+          and time CV\n\n        cv_results = xgb.cv(params, dtrain, num_boost_round=num_boost_round,
+          seed=42, nfold=5, metrics=[''mae''], early_stopping_rounds=10)\n        #
+          Update best score\n        mean_mae = cv_results[''test-mae-mean''].min()\n        boost_rounds
+          = cv_results[''test-mae-mean''].argmin()\n        print(\"\\tMAE {} for
+          {} rounds\\n\".format(mean_mae, boost_rounds))\n        if mean_mae < min_mae:\n            min_mae
+          = mean_mae\n            best_params = eta\n    print(\"Best params: {},
+          MAE: {}\".format(best_params, min_mae))\n    params[''eta''] = best_params\n\n    #############################
+          Testing next two parameters ############################\n\n    gridsearch_params
+          = [\n        (subsample, colsample)\n        for subsample in [i/10. for
+          i in range(7,11)]\n        for colsample in [i/10. for i in range(7,11)]\n    ]\n\n    min_mae
+          = float(\"Inf\")\n    best_params = None\n    # We start by the largest
+          values and go down to the smallest\n    for subsample, colsample in reversed(gridsearch_params):\n        print(\"CV
+          with subsample={}, colsample={}\".format(subsample, colsample))\n\n        #
+          We update our parameters\n        params[''subsample''] = subsample\n        params[''colsample_bytree'']
+          = colsample\n        # Run CV\n        cv_results = xgb.cv(\n            params,\n            dtrain,\n            num_boost_round=num_boost_round,\n            seed=42,\n            nfold=5,\n            metrics={''mae''},\n            early_stopping_rounds=10\n        )\n        #
+          Update best score\n        mean_mae = cv_results[''test-mae-mean''].min()\n        boost_rounds
+          = cv_results[''test-mae-mean''].argmin()\n        print(\"\\tMAE {} for
+          {} rounds\".format(mean_mae, boost_rounds))\n        if mean_mae < min_mae:\n            min_mae
+          = mean_mae\n            best_params = (subsample,colsample)\n    print(\"Best
+          params: {}, {}, MAE: {}\".format(best_params[0], best_params[1], min_mae))\n\n    params[''subsample'']
+          = best_params[0]\n    params[''colsample_bytree''] = best_params[1]\n\n    return
+          params\n\ndef _serialize_json(obj) -> str:\n    if isinstance(obj, str):\n        return
+          obj\n    import json\n    def default_serializer(obj):\n        if hasattr(obj,
+          ''to_struct''):\n            return obj.to_struct()\n        else:\n            raise
+          TypeError(\"Object of type ''%s'' is not JSON serializable and does not
+          have .to_struct() method.\" % obj.__class__.__name__)\n    return json.dumps(obj,
+          default=default_serializer, sort_keys=True)\n\nimport json\nimport argparse\n_parser
+          = argparse.ArgumentParser(prog=''Hypertune'', description='''')\n_parser.add_argument(\"--bucket-name\",
+          dest=\"bucket_name\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--processeddatafile\",
+          dest=\"processeddatafile\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--paramas\",
+          dest=\"paramas\", type=json.loads, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = hypertune(**_parsed_args)\n\n_outputs
+          = [_outputs]\n\n_output_serializers = [\n    _serialize_json,\n\n]\n\nimport
+          os\nfor idx, output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "docker.io/mkbansal0588/kubeflow"}}, "inputs": [{"name": "bucket_name"},
+          {"name": "processeddatafile"}, {"name": "paramas", "type": "JsonObject"}],
+          "name": "Hypertune", "outputs": [{"name": "Output", "type": "JsonObject"}]}',
+        pipelines.kubeflow.org/component_ref: '{}', pipelines.kubeflow.org/arguments.parameters: '{"bucket_name":
+          "mohittest0432", "paramas": "{\"colsample_bytree\": 1, \"eta\": 0.3, \"max_depth\":
+          6, \"min_child_weight\": 1, \"objective\": \"reg:squarederror\", \"subsample\":
+          1}", "processeddatafile": "{{inputs.parameters.preprocessingstep-Output}}"}'}
+  - name: model-training
+    container:
+      args: [--bucket-name, mohittest0432, --processeddatafile, '{{inputs.parameters.preprocessingstep-Output}}',
+        --paramas, '{"colsample_bytree": 1, "eta": 0.3, "max_depth": 6, "min_child_weight":
+          1, "objective": "reg:squarederror", "subsample": 1}', '----output-paths',
+        /tmp/outputs/Output/data]
+      command:
+      - python3
+      - -u
+      - -c
+      - |
+        def model_training(bucket_name, processeddatafile, paramas):
+            import pandas as pd
+            import numpy as np
+            import xgboost as xgb
+
+            # Now it is time to download the CSV from gcloud storage
+            import os
+            os.chdir("/")
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "/august-sandbox-298320-580249f0836f.json"
+
+            print(processeddatafile)
+            path = 'gs://' + bucket_name + '/' + processeddatafile
+            print(path)
+            df_data = pd.read_csv(path)
+
+            #Creating train and test split -
+            df_train = df_data[df_data['SalePrice'].isna() == False]
+            df_test = df_data[df_data['SalePrice'].isna() == True]
+
+            #Creating features and labels
+            label=pd.DataFrame(df_train.pop('SalePrice'))
+            x_train = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()
+            x_validation=df_train.iloc[int(df_train.count()[0] * .9):].to_numpy()
+            y_train = label.iloc[:int(df_train.count()[0] * .9)].to_numpy()
+            y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()
+
+            dtrain = xgb.DMatrix(x_train, y_train)
+            dvalidate = xgb.DMatrix(x_validation, y_validate)
+
+            params = paramas
+
+            #Metric to use to evaluate decision trees.
+            params['eval_metric'] = "mae"
+            # Number of rounds of boosting or number of trees to build
+            num_boost_round = 999
+
+            #Model fitting and predictions
+
+            model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=num_boost_round,
+                evals=[(dvalidate, "Test")],
+                early_stopping_rounds=10  #Train until eval matrix hasn't improved till N(10) round
+            )
+
+            return model.best_score
+
+        def _serialize_float(float_value: float) -> str:
+            if isinstance(float_value, str):
+                return float_value
+            if not isinstance(float_value, (float, int)):
+                raise TypeError('Value "{}" has type "{}" instead of float.'.format(str(float_value), str(type(float_value))))
+            return str(float_value)
+
+        import json
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Model training', description='')
+        _parser.add_argument("--bucket-name", dest="bucket_name", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--processeddatafile", dest="processeddatafile", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--paramas", dest="paramas", type=json.loads, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=1)
+        _parsed_args = vars(_parser.parse_args())
+        _output_files = _parsed_args.pop("_output_paths", [])
+
+        _outputs = model_training(**_parsed_args)
+
+        _outputs = [_outputs]
+
+        _output_serializers = [
+            _serialize_float,
+
+        ]
+
+        import os
+        for idx, output_file in enumerate(_output_files):
+            try:
+                os.makedirs(os.path.dirname(output_file))
+            except OSError:
+                pass
+            with open(output_file, 'w') as f:
+                f.write(_output_serializers[idx](_outputs[idx]))
+      image: docker.io/mkbansal0588/kubeflow
+    inputs:
+      parameters:
+      - {name: preprocessingstep-Output}
+    outputs:
+      parameters:
+      - name: model-training-Output
+        valueFrom: {path: /tmp/outputs/Output/data}
+      artifacts:
+      - {name: model-training-Output, path: /tmp/outputs/Output/data}
+    metadata:
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--bucket-name", {"inputValue": "bucket_name"}, "--processeddatafile",
+          {"inputValue": "processeddatafile"}, "--paramas", {"inputValue": "paramas"},
+          "----output-paths", {"outputPath": "Output"}], "command": ["python3", "-u",
+          "-c", "def model_training(bucket_name, processeddatafile, paramas):\n    import
+          pandas as pd\n    import numpy as np\n    import xgboost as xgb\n\n    #
+          Now it is time to download the CSV from gcloud storage\n    import os\n    os.chdir(\"/\")\n    os.environ[''GOOGLE_APPLICATION_CREDENTIALS'']
+          = \"/august-sandbox-298320-580249f0836f.json\"\n\n    print(processeddatafile)\n    path
+          = ''gs://'' + bucket_name + ''/'' + processeddatafile\n    print(path)\n    df_data
+          = pd.read_csv(path)\n\n    #Creating train and test split -\n    df_train
+          = df_data[df_data[''SalePrice''].isna() == False]\n    df_test = df_data[df_data[''SalePrice''].isna()
+          == True]\n\n    #Creating features and labels\n    label=pd.DataFrame(df_train.pop(''SalePrice''))\n    x_train
+          = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()\n    x_validation=df_train.iloc[int(df_train.count()[0]
+          * .9):].to_numpy()\n    y_train = label.iloc[:int(df_train.count()[0] *
+          .9)].to_numpy()\n    y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()\n\n    dtrain
+          = xgb.DMatrix(x_train, y_train)\n    dvalidate = xgb.DMatrix(x_validation,
+          y_validate)\n\n    params = paramas\n\n    #Metric to use to evaluate decision
+          trees.\n    params[''eval_metric''] = \"mae\"\n    # Number of rounds of
+          boosting or number of trees to build\n    num_boost_round = 999\n\n    #Model
+          fitting and predictions\n\n    model = xgb.train(\n        params,\n        dtrain,\n        num_boost_round=num_boost_round,\n        evals=[(dvalidate,
+          \"Test\")],\n        early_stopping_rounds=10  #Train until eval matrix
+          hasn''t improved till N(10) round\n    )\n\n    return model.best_score\n\ndef
+          _serialize_float(float_value: float) -> str:\n    if isinstance(float_value,
+          str):\n        return float_value\n    if not isinstance(float_value, (float,
+          int)):\n        raise TypeError(''Value \"{}\" has type \"{}\" instead of
+          float.''.format(str(float_value), str(type(float_value))))\n    return str(float_value)\n\nimport
+          json\nimport argparse\n_parser = argparse.ArgumentParser(prog=''Model training'',
+          description='''')\n_parser.add_argument(\"--bucket-name\", dest=\"bucket_name\",
+          type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--processeddatafile\",
+          dest=\"processeddatafile\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--paramas\",
+          dest=\"paramas\", type=json.loads, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = model_training(**_parsed_args)\n\n_outputs
+          = [_outputs]\n\n_output_serializers = [\n    _serialize_float,\n\n]\n\nimport
+          os\nfor idx, output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "docker.io/mkbansal0588/kubeflow"}}, "inputs": [{"name": "bucket_name"},
+          {"name": "processeddatafile"}, {"name": "paramas", "type": "JsonObject"}],
+          "name": "Model training", "outputs": [{"name": "Output", "type": "Float"}]}',
+        pipelines.kubeflow.org/component_ref: '{}', pipelines.kubeflow.org/arguments.parameters: '{"bucket_name":
+          "mohittest0432", "paramas": "{\"colsample_bytree\": 1, \"eta\": 0.3, \"max_depth\":
+          6, \"min_child_weight\": 1, \"objective\": \"reg:squarederror\", \"subsample\":
+          1}", "processeddatafile": "{{inputs.parameters.preprocessingstep-Output}}"}'}
+  - name: model-training-2
+    container:
+      args: [--bucket-name, mohittest0432, --processeddatafile, '{{inputs.parameters.preprocessingstep-Output}}',
+        --paramas, '{{inputs.parameters.hypertune-Output}}', '----output-paths', /tmp/outputs/Output/data]
+      command:
+      - python3
+      - -u
+      - -c
+      - |
+        def model_training(bucket_name, processeddatafile, paramas):
+            import pandas as pd
+            import numpy as np
+            import xgboost as xgb
+
+            # Now it is time to download the CSV from gcloud storage
+            import os
+            os.chdir("/")
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "/august-sandbox-298320-580249f0836f.json"
+
+            print(processeddatafile)
+            path = 'gs://' + bucket_name + '/' + processeddatafile
+            print(path)
+            df_data = pd.read_csv(path)
+
+            #Creating train and test split -
+            df_train = df_data[df_data['SalePrice'].isna() == False]
+            df_test = df_data[df_data['SalePrice'].isna() == True]
+
+            #Creating features and labels
+            label=pd.DataFrame(df_train.pop('SalePrice'))
+            x_train = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()
+            x_validation=df_train.iloc[int(df_train.count()[0] * .9):].to_numpy()
+            y_train = label.iloc[:int(df_train.count()[0] * .9)].to_numpy()
+            y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()
+
+            dtrain = xgb.DMatrix(x_train, y_train)
+            dvalidate = xgb.DMatrix(x_validation, y_validate)
+
+            params = paramas
+
+            #Metric to use to evaluate decision trees.
+            params['eval_metric'] = "mae"
+            # Number of rounds of boosting or number of trees to build
+            num_boost_round = 999
+
+            #Model fitting and predictions
+
+            model = xgb.train(
+                params,
+                dtrain,
+                num_boost_round=num_boost_round,
+                evals=[(dvalidate, "Test")],
+                early_stopping_rounds=10  #Train until eval matrix hasn't improved till N(10) round
+            )
+
+            return model.best_score
+
+        def _serialize_float(float_value: float) -> str:
+            if isinstance(float_value, str):
+                return float_value
+            if not isinstance(float_value, (float, int)):
+                raise TypeError('Value "{}" has type "{}" instead of float.'.format(str(float_value), str(type(float_value))))
+            return str(float_value)
+
+        import json
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Model training', description='')
+        _parser.add_argument("--bucket-name", dest="bucket_name", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--processeddatafile", dest="processeddatafile", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--paramas", dest="paramas", type=json.loads, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=1)
+        _parsed_args = vars(_parser.parse_args())
+        _output_files = _parsed_args.pop("_output_paths", [])
+
+        _outputs = model_training(**_parsed_args)
+
+        _outputs = [_outputs]
+
+        _output_serializers = [
+            _serialize_float,
+
+        ]
+
+        import os
+        for idx, output_file in enumerate(_output_files):
+            try:
+                os.makedirs(os.path.dirname(output_file))
+            except OSError:
+                pass
+            with open(output_file, 'w') as f:
+                f.write(_output_serializers[idx](_outputs[idx]))
+      image: docker.io/mkbansal0588/kubeflow
+    inputs:
+      parameters:
+      - {name: hypertune-Output}
+      - {name: preprocessingstep-Output}
+    outputs:
+      parameters:
+      - name: model-training-2-Output
+        valueFrom: {path: /tmp/outputs/Output/data}
+      artifacts:
+      - {name: model-training-2-Output, path: /tmp/outputs/Output/data}
+    metadata:
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--bucket-name", {"inputValue": "bucket_name"}, "--processeddatafile",
+          {"inputValue": "processeddatafile"}, "--paramas", {"inputValue": "paramas"},
+          "----output-paths", {"outputPath": "Output"}], "command": ["python3", "-u",
+          "-c", "def model_training(bucket_name, processeddatafile, paramas):\n    import
+          pandas as pd\n    import numpy as np\n    import xgboost as xgb\n\n    #
+          Now it is time to download the CSV from gcloud storage\n    import os\n    os.chdir(\"/\")\n    os.environ[''GOOGLE_APPLICATION_CREDENTIALS'']
+          = \"/august-sandbox-298320-580249f0836f.json\"\n\n    print(processeddatafile)\n    path
+          = ''gs://'' + bucket_name + ''/'' + processeddatafile\n    print(path)\n    df_data
+          = pd.read_csv(path)\n\n    #Creating train and test split -\n    df_train
+          = df_data[df_data[''SalePrice''].isna() == False]\n    df_test = df_data[df_data[''SalePrice''].isna()
+          == True]\n\n    #Creating features and labels\n    label=pd.DataFrame(df_train.pop(''SalePrice''))\n    x_train
+          = df_train.iloc[:int(df_train.count()[0] * .9)].to_numpy()\n    x_validation=df_train.iloc[int(df_train.count()[0]
+          * .9):].to_numpy()\n    y_train = label.iloc[:int(df_train.count()[0] *
+          .9)].to_numpy()\n    y_validate = label.iloc[int(df_train.count()[0] * .9):].to_numpy()\n\n    dtrain
+          = xgb.DMatrix(x_train, y_train)\n    dvalidate = xgb.DMatrix(x_validation,
+          y_validate)\n\n    params = paramas\n\n    #Metric to use to evaluate decision
+          trees.\n    params[''eval_metric''] = \"mae\"\n    # Number of rounds of
+          boosting or number of trees to build\n    num_boost_round = 999\n\n    #Model
+          fitting and predictions\n\n    model = xgb.train(\n        params,\n        dtrain,\n        num_boost_round=num_boost_round,\n        evals=[(dvalidate,
+          \"Test\")],\n        early_stopping_rounds=10  #Train until eval matrix
+          hasn''t improved till N(10) round\n    )\n\n    return model.best_score\n\ndef
+          _serialize_float(float_value: float) -> str:\n    if isinstance(float_value,
+          str):\n        return float_value\n    if not isinstance(float_value, (float,
+          int)):\n        raise TypeError(''Value \"{}\" has type \"{}\" instead of
+          float.''.format(str(float_value), str(type(float_value))))\n    return str(float_value)\n\nimport
+          json\nimport argparse\n_parser = argparse.ArgumentParser(prog=''Model training'',
+          description='''')\n_parser.add_argument(\"--bucket-name\", dest=\"bucket_name\",
+          type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--processeddatafile\",
+          dest=\"processeddatafile\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--paramas\",
+          dest=\"paramas\", type=json.loads, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = model_training(**_parsed_args)\n\n_outputs
+          = [_outputs]\n\n_output_serializers = [\n    _serialize_float,\n\n]\n\nimport
+          os\nfor idx, output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "docker.io/mkbansal0588/kubeflow"}}, "inputs": [{"name": "bucket_name"},
+          {"name": "processeddatafile"}, {"name": "paramas", "type": "JsonObject"}],
+          "name": "Model training", "outputs": [{"name": "Output", "type": "Float"}]}',
+        pipelines.kubeflow.org/component_ref: '{}', pipelines.kubeflow.org/arguments.parameters: '{"bucket_name":
+          "mohittest0432", "paramas": "{{inputs.parameters.hypertune-Output}}", "processeddatafile":
+          "{{inputs.parameters.preprocessingstep-Output}}"}'}
+  - name: preprocessingstep
+    container:
+      args: [--bucket-name, mohittest0432, --train-file, train.csv, --test-file, test.csv,
+        '----output-paths', /tmp/outputs/Output/data]
+      command:
+      - python3
+      - -u
+      - -c
+      - |
+        def preprocessingstep(bucket_name, train_file, test_file):
+            import pandas as pd
+            import numpy as np
+
+            # Now it is time to download the CSV from gcloud storage
+            import os
+            os.chdir("/")
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = "/august-sandbox-298320-580249f0836f.json"
+
+            for file in [train_file, test_file]:
+                path = 'gs://' + bucket_name + '/' + file
+                if 'train' in path:
+                    df_train = pd.read_csv(path)
+                else:
+                    df_test = pd.read_csv(path)
+
+            # Here start the preprocessing step
+            data = pd.concat([df_train, df_test],sort=True)
+            target = pd.DataFrame(data.pop('SalePrice'))
+            data = data.dropna(axis=1)
+            list1 = []
+            for key, value in data.dtypes.iteritems():
+                if (value == 'object'):
+                    list1.append(key)
+
+            for item in list1:
+                data[item] = pd.Categorical(data[item])
+                data[item] = data[item].cat.codes
+
+            data['SalePrice'] = target
+
+            # now the files are ready to be uploaded.
+
+            resultant_file = 'data.csv'
+            resultant_path = 'gs://' + bucket_name + '/'
+            processed_file_location = resultant_path + resultant_file
+            data.to_csv(processed_file_location)
+
+            print(resultant_file)
+
+            return resultant_file
+
+        def _serialize_str(str_value: str) -> str:
+            if not isinstance(str_value, str):
+                raise TypeError('Value "{}" has type "{}" instead of str.'.format(str(str_value), str(type(str_value))))
+            return str_value
+
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Preprocessingstep', description='')
+        _parser.add_argument("--bucket-name", dest="bucket_name", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--train-file", dest="train_file", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--test-file", dest="test_file", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("----output-paths", dest="_output_paths", type=str, nargs=1)
+        _parsed_args = vars(_parser.parse_args())
+        _output_files = _parsed_args.pop("_output_paths", [])
+
+        _outputs = preprocessingstep(**_parsed_args)
+
+        _outputs = [_outputs]
+
+        _output_serializers = [
+            _serialize_str,
+
+        ]
+
+        import os
+        for idx, output_file in enumerate(_output_files):
+            try:
+                os.makedirs(os.path.dirname(output_file))
+            except OSError:
+                pass
+            with open(output_file, 'w') as f:
+                f.write(_output_serializers[idx](_outputs[idx]))
+      image: docker.io/mkbansal0588/kubeflow
+    outputs:
+      parameters:
+      - name: preprocessingstep-Output
+        valueFrom: {path: /tmp/outputs/Output/data}
+      artifacts:
+      - {name: preprocessingstep-Output, path: /tmp/outputs/Output/data}
+    metadata:
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--bucket-name", {"inputValue": "bucket_name"}, "--train-file",
+          {"inputValue": "train_file"}, "--test-file", {"inputValue": "test_file"},
+          "----output-paths", {"outputPath": "Output"}], "command": ["python3", "-u",
+          "-c", "def preprocessingstep(bucket_name, train_file, test_file):\n    import
+          pandas as pd\n    import numpy as np\n\n    # Now it is time to download
+          the CSV from gcloud storage\n    import os\n    os.chdir(\"/\")\n    os.environ[''GOOGLE_APPLICATION_CREDENTIALS'']
+          = \"/august-sandbox-298320-580249f0836f.json\"\n\n    for file in [train_file,
+          test_file]:\n        path = ''gs://'' + bucket_name + ''/'' + file\n        if
+          ''train'' in path:\n            df_train = pd.read_csv(path)\n        else:\n            df_test
+          = pd.read_csv(path)\n\n    # Here start the preprocessing step\n    data
+          = pd.concat([df_train, df_test],sort=True)\n    target = pd.DataFrame(data.pop(''SalePrice''))\n    data
+          = data.dropna(axis=1)\n    list1 = []\n    for key, value in data.dtypes.iteritems():\n        if
+          (value == ''object''):\n            list1.append(key)\n\n    for item in
+          list1:\n        data[item] = pd.Categorical(data[item])\n        data[item]
+          = data[item].cat.codes\n\n    data[''SalePrice''] = target\n\n    # now
+          the files are ready to be uploaded.\n\n    resultant_file = ''data.csv''\n    resultant_path
+          = ''gs://'' + bucket_name + ''/''\n    processed_file_location = resultant_path
+          + resultant_file\n    data.to_csv(processed_file_location)\n\n    print(resultant_file)\n\n    return
+          resultant_file\n\ndef _serialize_str(str_value: str) -> str:\n    if not
+          isinstance(str_value, str):\n        raise TypeError(''Value \"{}\" has
+          type \"{}\" instead of str.''.format(str(str_value), str(type(str_value))))\n    return
+          str_value\n\nimport argparse\n_parser = argparse.ArgumentParser(prog=''Preprocessingstep'',
+          description='''')\n_parser.add_argument(\"--bucket-name\", dest=\"bucket_name\",
+          type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--train-file\",
+          dest=\"train_file\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--test-file\",
+          dest=\"test_file\", type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"----output-paths\",
+          dest=\"_output_paths\", type=str, nargs=1)\n_parsed_args = vars(_parser.parse_args())\n_output_files
+          = _parsed_args.pop(\"_output_paths\", [])\n\n_outputs = preprocessingstep(**_parsed_args)\n\n_outputs
+          = [_outputs]\n\n_output_serializers = [\n    _serialize_str,\n\n]\n\nimport
+          os\nfor idx, output_file in enumerate(_output_files):\n    try:\n        os.makedirs(os.path.dirname(output_file))\n    except
+          OSError:\n        pass\n    with open(output_file, ''w'') as f:\n        f.write(_output_serializers[idx](_outputs[idx]))\n"],
+          "image": "docker.io/mkbansal0588/kubeflow"}}, "inputs": [{"name": "bucket_name"},
+          {"name": "train_file"}, {"name": "test_file"}], "name": "Preprocessingstep",
+          "outputs": [{"name": "Output", "type": "String"}]}', pipelines.kubeflow.org/component_ref: '{}',
+        pipelines.kubeflow.org/arguments.parameters: '{"bucket_name": "mohittest0432",
+          "test_file": "test.csv", "train_file": "train.csv"}'}
+  - name: prettyprintmatrix
+    container:
+      args: [--pretuned-metric, '{{inputs.parameters.model-training-Output}}', --posttuned-metric,
+        '{{inputs.parameters.model-training-2-Output}}']
+      command:
+      - python3
+      - -u
+      - -c
+      - |
+        def prettyprintmatrix(pretuned_metric, posttuned_metric):
+            print("pretuned: {} vs postuned: {}".format(pretuned_metric, posttuned_metric))
+
+        import argparse
+        _parser = argparse.ArgumentParser(prog='Prettyprintmatrix', description='')
+        _parser.add_argument("--pretuned-metric", dest="pretuned_metric", type=str, required=True, default=argparse.SUPPRESS)
+        _parser.add_argument("--posttuned-metric", dest="posttuned_metric", type=str, required=True, default=argparse.SUPPRESS)
+        _parsed_args = vars(_parser.parse_args())
+
+        _outputs = prettyprintmatrix(**_parsed_args)
+      image: docker.io/mkbansal0588/kubeflow
+    inputs:
+      parameters:
+      - {name: model-training-2-Output}
+      - {name: model-training-Output}
+    metadata:
+      annotations: {pipelines.kubeflow.org/component_spec: '{"implementation": {"container":
+          {"args": ["--pretuned-metric", {"inputValue": "pretuned_metric"}, "--posttuned-metric",
+          {"inputValue": "posttuned_metric"}], "command": ["python3", "-u", "-c",
+          "def prettyprintmatrix(pretuned_metric, posttuned_metric):\n    print(\"pretuned:
+          {} vs postuned: {}\".format(pretuned_metric, posttuned_metric))\n\nimport
+          argparse\n_parser = argparse.ArgumentParser(prog=''Prettyprintmatrix'',
+          description='''')\n_parser.add_argument(\"--pretuned-metric\", dest=\"pretuned_metric\",
+          type=str, required=True, default=argparse.SUPPRESS)\n_parser.add_argument(\"--posttuned-metric\",
+          dest=\"posttuned_metric\", type=str, required=True, default=argparse.SUPPRESS)\n_parsed_args
+          = vars(_parser.parse_args())\n\n_outputs = prettyprintmatrix(**_parsed_args)\n"],
+          "image": "docker.io/mkbansal0588/kubeflow"}}, "inputs": [{"name": "pretuned_metric"},
+          {"name": "posttuned_metric"}], "name": "Prettyprintmatrix"}', pipelines.kubeflow.org/component_ref: '{}',
+        pipelines.kubeflow.org/arguments.parameters: '{"posttuned_metric": "{{inputs.parameters.model-training-2-Output}}",
+          "pretuned_metric": "{{inputs.parameters.model-training-Output}}"}'}
+  arguments:
+    parameters: []
+  serviceAccountName: pipeline-runner
